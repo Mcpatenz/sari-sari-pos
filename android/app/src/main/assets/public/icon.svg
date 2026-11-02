@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="TindahanPOS">
+  <rect width="512" height="512" rx="112" fill="#070c18" />
+  <path d="M120 208h272l-20 176a24 24 0 0 1-24 21H164a24 24 0 0 1-24-21l-20-176Z" fill="#fff8ee" />
+  <path d="M188 208c0-38 30-68 68-68s68 30 68 68" fill="none" stroke="#f7a01d" stroke-width="26" stroke-linecap="round" />
+  <circle cx="212" cy="300" r="17" fill="#12b76a" />
+  <circle cx="300" cy="300" r="17" fill="#f7a01d" />
+  <path d="M212 348h88" stroke="#ff5a6e" stroke-width="20" stroke-linecap="round" />
+</svg>

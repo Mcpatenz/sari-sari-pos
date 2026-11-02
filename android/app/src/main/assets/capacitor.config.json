@@ -1,0 +1,8 @@
+{
+	"appId": "ph.tindahan.pos",
+	"appName": "TindahanPOS",
+	"webDir": "public",
+	"server": {
+		"url": "https://sari-sari-pos-amber.vercel.app"
+	}
+}

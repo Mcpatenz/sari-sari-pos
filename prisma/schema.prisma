@@ -1,0 +1,341 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  OWNER
+  CASHIER
+}
+
+enum StoreStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+// PIECE  -> stock is counted in pieces, price is per piece.
+// WEIGHT -> stock is counted in grams, price is per kilogram.
+// VOLUME -> stock is counted in milliliters, price is per liter.
+enum ProductKind {
+  PIECE
+  WEIGHT
+  VOLUME
+}
+
+enum SaleStatus {
+  COMPLETED
+  VOIDED
+  RETURNED
+}
+
+// How the customer paid. GCASH shows the store's QR at checkout.
+enum PaymentMethod {
+  CASH
+  GCASH
+  UTANG
+}
+
+enum UtangStatus {
+  PENDING
+  PAID
+}
+
+
+// Every change to a product's stock is recorded so the owner can audit it.
+enum MovementKind {
+  SALE
+  RESTOCK
+  ADJUSTMENT
+  VOID
+  RETURN
+}
+
+model Store {
+  id        String      @id @default(cuid())
+  name      String
+  slug      String?     @unique
+  // Printed on receipts and shown in the UI.
+  address   String?
+  phone     String?
+  // Store logo/photo
+  photoUrl  String?
+  // The store's GCash payment QR, stored as a data URL so it renders offline.
+  gcashQrDataUrl String?
+  businessOpenTime  String? // HH:mm local store time
+  businessCloseTime String? // HH:mm local store time
+  status    StoreStatus @default(ACTIVE)
+  createdAt DateTime    @default(now())
+
+  users      User[]
+  products   Product[]
+  categories Category[]
+  devices    Device[]
+  sales      Sale[]
+  movements  InventoryMovement[]
+  expenses   Expense[]
+  suppliers  Supplier[]
+  purchases  Purchase[]
+  customers  Customer[]
+}
+
+model User {
+  id             String    @id @default(cuid())
+  storeId        String
+  name           String
+  // Login identity is globally unique across every store.
+  email          String?   @unique
+  passwordHash   String?
+  // Staff profile. Optional, filled in by the employee or the owner. The
+  // employee id is generated once (LASTNAME4 + YYYY + MM + sequence).
+  employeeId     String?
+  address        String?
+  birthdate      DateTime?
+  gender         String?
+  civilStatus    String?
+  contactNumber  String?
+  dateHired      DateTime?
+  // Avatar stored as a data URL so it loads without a file server.
+  photoUrl       String?
+  // Self-service password recovery: a question the user picks and the hashed,
+  // normalized answer used to verify it. Both null until the user sets them.
+  securityQuestion   String?
+  securityAnswerHash String?
+  role           UserRole  @default(CASHIER)
+  active         Boolean   @default(true)
+  // Bumped to revoke every outstanding session for this user.
+  sessionVersion Int       @default(0)
+  // Brute-force protection: consecutive failed logins and the lockout expiry.
+  failedLoginAttempts Int      @default(0)
+  lockedUntil         DateTime?
+  lastLoginAt    DateTime?
+  createdAt      DateTime  @default(now())
+
+  store     Store               @relation(fields: [storeId], references: [id])
+  sales     Sale[]
+  movements InventoryMovement[]
+  expenses  Expense[]
+  purchases Purchase[]
+
+  @@unique([storeId, employeeId])
+  @@index([storeId, role])
+}
+
+
+model Customer {
+  id            String   @id @default(cuid())
+  storeId       String
+  customerId    String
+  name          String
+  contactNumber String?
+  address       String?
+  photoUrl      String?
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  store Store @relation(fields: [storeId], references: [id])
+  sales Sale[]
+
+  @@unique([storeId, customerId])
+  @@index([storeId, name])
+  @@index([storeId, active])
+}
+
+model Device {
+  id         String    @id @default(cuid())
+  storeId    String
+  name       String
+  lastSyncAt DateTime?
+  active     Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+
+  store Store @relation(fields: [storeId], references: [id])
+
+  @@index([storeId, active])
+}
+
+model Product {
+  id               String      @id @default(cuid())
+  storeId          String
+  sku              String
+  barcode          String?
+  name             String
+  category         String      @default("General")
+  kind             ProductKind
+  // PIECE: cents per piece. WEIGHT: cents per kilogram. VOLUME: cents per liter.
+  basePriceCents   Int
+  // PIECE: pieces. WEIGHT: grams. VOLUME: milliliters.
+  stockBaseUnits   Int         @default(0)
+  costPerBaseCents Int         @default(0)
+  lowStockAt       Int         @default(0)
+  // SellingUnit[]: preset sell options such as bundles, sacks, packs and cases.
+  units            Json        @default("[]")
+  active           Boolean     @default(true)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  store         Store               @relation(fields: [storeId], references: [id])
+  sales         SaleItem[]
+  movements     InventoryMovement[]
+  purchaseItems PurchaseItem[]
+
+  @@unique([storeId, sku])
+  @@index([storeId, active])
+}
+
+model Sale {
+  id               String     @id @default(cuid())
+  storeId          String
+  deviceId         String?
+  cashierId        String?
+  customerId       String?
+  receiptNumber    String
+  idempotencyKey   String
+  status           SaleStatus @default(COMPLETED)
+  paymentMethod    PaymentMethod @default(CASH)
+  utangStatus      UtangStatus   @default(PENDING)
+  collectedAt      DateTime?
+  collectedCents   Int            @default(0)
+  totalCents       Int
+  discountCents    Int        @default(0)
+  cashReceivedCents Int
+  changeCents      Int
+  note             String?
+  // GCash confirmation/reference number, captured at checkout for GCASH sales.
+  referenceNumber  String?
+  createdAt        DateTime   @default(now())
+  syncedAt         DateTime?
+
+  store     Store     @relation(fields: [storeId], references: [id])
+  cashier   User?     @relation(fields: [cashierId], references: [id])
+  customer   Customer? @relation(fields: [customerId], references: [id])
+  items     SaleItem[]
+
+  @@unique([storeId, idempotencyKey])
+  @@unique([storeId, receiptNumber])
+  @@index([storeId, createdAt])
+  @@index([customerId])
+}
+
+model SaleItem {
+  id             String      @id @default(cuid())
+  saleId         String
+  productId      String?
+  sku            String
+  productName    String
+  kind           ProductKind
+  quantityBase   Int
+  unitLabel      String?
+  lineTotalCents Int
+
+  sale    Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id])
+
+  @@index([saleId])
+  @@index([productId])
+}
+
+model InventoryMovement {
+  id           String       @id @default(cuid())
+  storeId      String
+  productId    String
+  userId       String?
+  kind         MovementKind
+  // Signed change in base units: positive adds stock, negative removes it.
+  quantityBase Int
+  note         String?
+  createdAt    DateTime     @default(now())
+
+  store   Store   @relation(fields: [storeId], references: [id])
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([storeId, createdAt])
+  @@index([productId])
+}
+
+model Expense {
+  id          String   @id @default(cuid())
+  storeId     String
+  userId      String?
+  category    String   @default("General")
+  description String
+  amountCents Int
+  // Photo of the paper receipt, stored as a data URL like other store images.
+  receiptUrl  String?
+  spentAt     DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  store Store @relation(fields: [storeId], references: [id])
+  user  User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([storeId, spentAt])
+}
+
+// Owner-managed product categories. Products keep their category as a name
+// string so historical sales and offline caches stay simple; this table lets a
+// store keep empty categories and rename them everywhere in one step.
+model Category {
+  id        String   @id @default(cuid())
+  storeId   String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@unique([storeId, name])
+  @@index([storeId])
+}
+
+model Supplier {
+  id        String   @id @default(cuid())
+  storeId   String
+  name      String
+  phone     String?
+  note      String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  store     Store      @relation(fields: [storeId], references: [id])
+  purchases Purchase[]
+
+  @@index([storeId, active])
+}
+
+model Purchase {
+  id          String   @id @default(cuid())
+  storeId     String
+  supplierId  String?
+  userId      String?
+  totalCents  Int      @default(0)
+  note        String?
+  createdAt   DateTime @default(now())
+
+  store    Store          @relation(fields: [storeId], references: [id])
+  supplier Supplier?      @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  user     User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  items    PurchaseItem[]
+
+  @@index([storeId, createdAt])
+}
+
+model PurchaseItem {
+  id            String @id @default(cuid())
+  purchaseId    String
+  productId     String?
+  productName   String
+  quantityBase  Int
+  unitCostCents Int
+
+  purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  product  Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([purchaseId])
+  @@index([productId])
+}
