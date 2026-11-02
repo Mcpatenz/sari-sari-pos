@@ -2,22 +2,32 @@
 
 import { useEffect, useRef, useState } from "react";
 import { BrowserMultiFormatReader, type IScannerControls } from "@zxing/browser";
-import { Barcode, Camera, CameraOff, Keyboard, Loader2 } from "lucide-react";
+import { Barcode, Camera, CameraOff, ImageUp, Keyboard, Loader2 } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 
 function cameraErrorMessage(error: unknown): string {
   if (error instanceof DOMException) {
     if (error.name === "NotAllowedError" || error.name === "SecurityError") {
-      return "Camera permission was denied. Allow camera access, or type the code instead.";
+      return "Camera permission was denied. Allow camera access for this site in your browser settings, then tap Try again.";
     }
-    if (error.name === "NotFoundError" || error.name === "OverconstrainedError") {
+    if (error.name === "NotFoundError") {
       return "No camera was found on this device. Type the code instead.";
     }
+    if (error.name === "OverconstrainedError") {
+      return "This device's camera does not support the requested mode. Tap Try again or type the code instead.";
+    }
     if (error.name === "NotReadableError") {
-      return "The camera is busy in another app. Close it, or type the code instead.";
+      return "The camera is busy in another app. Close it, then tap Try again or type the code instead.";
     }
   }
-  return "Could not start the camera. Type the code instead.";
+  return "Could not start the camera. Tap Try again or type the code instead.";
+}
+
+function isConstraintFailure(error: unknown): boolean {
+  return (
+    error instanceof DOMException &&
+    (error.name === "OverconstrainedError" || error.name === "NotFoundError")
+  );
 }
 
 export function BarcodeScanner({
@@ -28,6 +38,7 @@ export function BarcodeScanner({
   onClose: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
   const detectedRef = useRef(false);
   const onDetectedRef = useRef(onDetected);
@@ -39,64 +50,138 @@ export function BarcodeScanner({
   const [starting, setStarting] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [manual, setManual] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoError, setPhotoError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const video = videoRef.current;
 
-    if (!video || !navigator.mediaDevices?.getUserMedia) {
-      setError("Camera scanning needs HTTPS or localhost. Type the code instead.");
-      setStarting(false);
-      return;
-    }
+    detectedRef.current = false;
+    controlsRef.current?.stop();
+    controlsRef.current = null;
 
-    const reader = new BrowserMultiFormatReader(undefined, {
-      delayBetweenScanAttempts: 120,
-    });
+    async function start() {
+      if (!video) {
+        setError("Could not prepare the camera preview. Type the code instead.");
+        setStarting(false);
+        return;
+      }
 
-    reader
-      .decodeFromConstraints(
-        {
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-          audio: false,
-        },
-        video,
-        (result) => {
-          const code = result?.getText().trim() ?? "";
-          if (!code || code.length < 3 || detectedRef.current) return;
-          detectedRef.current = true;
-          navigator.vibrate?.(60);
-          // Stop the stream before handing the code back so the camera light
-          // turns off immediately and the modal can close cleanly.
-          controlsRef.current?.stop();
-          controlsRef.current = null;
-          onDetectedRef.current(code);
-        },
-      )
-      .then((controls) => {
+      if (
+        !window.isSecureContext &&
+        window.location.hostname !== "localhost"
+      ) {
+        setError("Camera scanning needs a secure HTTPS connection. Type the code instead.");
+        setStarting(false);
+        return;
+      }
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setError(
+          "This browser cannot access the camera. Use a recent Chrome, Safari or Edge, or type the code instead.",
+        );
+        setStarting(false);
+        return;
+      }
+
+      setStarting(true);
+      setError(null);
+
+      const reader = new BrowserMultiFormatReader(undefined, {
+        delayBetweenScanAttempts: 120,
+      });
+
+      function handleResult(result: { getText: () => string } | null | undefined) {
+        const code = result?.getText().trim() ?? "";
+        if (!code || code.length < 3 || detectedRef.current) return;
+        detectedRef.current = true;
+        navigator.vibrate?.(60);
+        // Stop the stream before handing the code back so the camera light
+        // turns off immediately and the modal can close cleanly.
+        controlsRef.current?.stop();
+        controlsRef.current = null;
+        onDetectedRef.current(code);
+      }
+
+      try {
+        let controls: IScannerControls;
+        try {
+          controls = await reader.decodeFromConstraints(
+            {
+              video: {
+                facingMode: { ideal: "environment" },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+              audio: false,
+            },
+            video,
+            handleResult,
+          );
+        } catch (firstError) {
+          // Some phones expose only a front camera or reject the requested
+          // resolution. Fall back to whatever camera the device offers.
+          if (!isConstraintFailure(firstError)) throw firstError;
+          controls = await reader.decodeFromConstraints(
+            { video: true, audio: false },
+            video,
+            handleResult,
+          );
+        }
+
         if (cancelled) {
           controls.stop();
           return;
         }
+
         controlsRef.current = controls;
         setStarting(false);
-      })
-      .catch((err: unknown) => {
+        void video.play().catch(() => {
+          // The stream is attached; autoplay rejections are harmless here.
+        });
+      } catch (err: unknown) {
         if (cancelled) return;
         setError(cameraErrorMessage(err));
         setStarting(false);
-      });
+      }
+    }
+
+    void start();
 
     return () => {
       cancelled = true;
       controlsRef.current?.stop();
       controlsRef.current = null;
     };
-  }, []);
+  }, [attempt]);
+
+  function acceptCode(code: string) {
+    const trimmed = code.trim();
+    if (!trimmed) return;
+    controlsRef.current?.stop();
+    controlsRef.current = null;
+    onDetected(trimmed);
+  }
+
+  async function scanPhoto(file: File | undefined) {
+    if (!file) return;
+    setPhotoBusy(true);
+    setPhotoError(null);
+    const url = URL.createObjectURL(file);
+    try {
+      const reader = new BrowserMultiFormatReader();
+      const result = await reader.decodeFromImageUrl(url);
+      acceptCode(result.getText());
+    } catch {
+      setPhotoError("No barcode found in that photo. Try a clearer, closer shot.");
+    } finally {
+      URL.revokeObjectURL(url);
+      setPhotoBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
 
   return (
     <Modal
@@ -138,7 +223,16 @@ export function BarcodeScanner({
             <div>
               <CameraOff className="mx-auto h-8 w-8 text-mango" />
               <p className="mt-3 text-sm font-semibold">Camera unavailable</p>
-              <p className="mt-1 max-w-xs text-xs leading-5 text-cream/60">{error}</p>
+              <p className="mx-auto mt-1 max-w-xs text-xs leading-5 text-cream/60">
+                {error}
+              </p>
+              <button
+                type="button"
+                onClick={() => setAttempt((current) => current + 1)}
+                className="btn btn-gold btn-sm mt-3"
+              >
+                Try again
+              </button>
             </div>
           </div>
         )}
@@ -157,8 +251,7 @@ export function BarcodeScanner({
           className="mt-3 flex gap-2"
           onSubmit={(event) => {
             event.preventDefault();
-            const code = manual.trim();
-            if (code) onDetected(code);
+            acceptCode(manual);
           }}
         >
           <input
@@ -173,6 +266,33 @@ export function BarcodeScanner({
             Use code
           </button>
         </form>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(event) => void scanPhoto(event.target.files?.[0])}
+          />
+          <button
+            type="button"
+            onClick={() => fileRef.current?.click()}
+            disabled={photoBusy}
+            className="inline-flex items-center gap-1.5 rounded-full border border-ink/12 px-3 py-1.5 text-xs font-semibold transition hover:border-leaf hover:text-leaf disabled:opacity-50"
+          >
+            {photoBusy ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <ImageUp className="h-3.5 w-3.5" />
+            )}
+            Use a photo
+          </button>
+          <span className="text-xs text-ink/45">
+            Snap or upload the code if the camera won&apos;t start.
+          </span>
+        </div>
+        {photoError && <p className="mt-2 text-xs text-berry">{photoError}</p>}
       </div>
     </Modal>
   );
